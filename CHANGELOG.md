@@ -14,6 +14,8 @@
   repeated transactions.
 - Add an explicit force-limited return to the measured protective pose after
   calibration.
+- Wait for post-calibration settling and use a rolling stable window for tare
+  so isolated startup transients do not invalidate calibration.
 
 ## 1.0.1
 

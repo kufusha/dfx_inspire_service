@@ -150,6 +150,9 @@ Calibration captures a per-actuator unloaded median baseline and saves it to
 contact limits use force above that baseline; the firmware force threshold is
 shifted by the same offset. Normal control refuses to start without a valid
 saved baseline. Use `--force-baseline-file PATH` to select another location.
+After calibration the service waits three seconds for sensor settling, then
+accepts only a recent 31-sample window whose per-actuator spread is at most
+50 g; an early transient therefore ages out instead of invalidating the run.
 
 Some hand firmware versions do not return a recognizable calibration
 acknowledgement. The service warns and continues in that case, then relies on

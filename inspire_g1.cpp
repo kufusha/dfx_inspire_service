@@ -35,7 +35,8 @@ constexpr double kBackoff = 0.02;
 constexpr double kEmergencyBackoff = 0.05;
 constexpr double kDirectionEpsilon = 0.002;
 constexpr int kTareSamples = 31;
-constexpr int kTareMaxAttempts = 200;
+constexpr int kTareMaxAttempts = 500;
+constexpr int kTareSettleSeconds = 3;
 constexpr double kCalibrationOpenPosition = 0.90;
 constexpr double kCalibrationOpeningSpeed = 100.0;
 constexpr int kOpenMaxAttempts = 100;
@@ -285,50 +286,56 @@ private:
   void tareForceSensors()
   {
     std::array<std::vector<double>, kTotalDof> samples;
-    int right_count = 0;
-    int left_count = 0;
+    bool stable = false;
 
-    std::cout << "[InspireForce] Measuring unloaded force baseline..." << std::endl;
-    for (int attempt = 0;
-         attempt < kTareMaxAttempts &&
-             (right_count < kTareSamples || left_count < kTareSamples);
-         ++attempt)
+    std::cout << "[InspireForce] Waiting " << kTareSettleSeconds
+              << " seconds for force sensors to settle..." << std::endl;
+    sleep(kTareSettleSeconds);
+    std::cout << "[InspireForce] Measuring unloaded force baseline..."
+              << std::endl;
+    for (int attempt = 0; attempt < kTareMaxAttempts; ++attempt)
     {
-      HandVector sample;
-      if (right_count < kTareSamples && righthand->GetForce(sample) == 0)
+      HandVector right_sample;
+      HandVector left_sample;
+      if (righthand->GetForce(right_sample) != 0 ||
+          lefthand->GetForce(left_sample) != 0)
+        continue;
+
+      for (int i = 0; i < kDofPerHand; ++i)
       {
-        for (int i = 0; i < kDofPerHand; ++i)
-          samples[i].push_back(sample(i));
-        ++right_count;
+        samples[i].push_back(right_sample(i));
+        samples[kDofPerHand + i].push_back(left_sample(i));
       }
-      if (left_count < kTareSamples && lefthand->GetForce(sample) == 0)
+      for (auto& window : samples)
       {
-        for (int i = 0; i < kDofPerHand; ++i)
-          samples[kDofPerHand + i].push_back(sample(i));
-        ++left_count;
+        if (window.size() > kTareSamples)
+          window.erase(window.begin());
       }
+      if (samples[0].size() < kTareSamples)
+        continue;
+
+      stable = true;
+      for (const auto& window : samples)
+      {
+        const auto [minimum, maximum] =
+            std::minmax_element(window.begin(), window.end());
+        const double spread_g = (*maximum - *minimum) * 1000.0 / 9.8;
+        if (spread_g > kTareMaxSpreadG)
+        {
+          stable = false;
+          break;
+        }
+      }
+      if (stable)
+        break;
     }
 
-    if (right_count < kTareSamples || left_count < kTareSamples)
-    {
-      std::cerr << "[InspireForce] ERROR: could not collect a reliable force "
-                   "baseline (right=" << right_count << "/" << kTareSamples
-                << ", left=" << left_count << "/" << kTareSamples << ")"
-                << std::endl;
-      std::exit(1);
-    }
+    if (!stable)
+      fail("force sensors did not produce a stable unloaded window; keep "
+           "hands open and untouched, then retry");
 
     for (int i = 0; i < kTotalDof; ++i)
-    {
-      const auto [minimum, maximum] =
-          std::minmax_element(samples[i].begin(), samples[i].end());
-      const double spread_g = (*maximum - *minimum) * 1000.0 / 9.8;
-      if (spread_g > kTareMaxSpreadG)
-        fail(std::string("force changed during baseline capture for ") +
-             (i < kDofPerHand ? "right " : "left ") +
-             kActuatorNames[i % kDofPerHand] + "; keep hands unloaded");
       force_offset_n(i) = median(samples[i]);
-    }
     baseline_valid_ = true;
 
     std::cout << "[InspireForce] Unloaded baseline captured:" << std::endl;
