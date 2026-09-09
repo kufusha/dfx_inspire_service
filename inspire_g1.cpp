@@ -32,7 +32,6 @@ constexpr double kDefaultForceLimitG = 100.0;
 constexpr double kDefaultClosingSpeed = 25.0;
 constexpr double kDefaultOpeningSpeed = 1000.0;
 constexpr double kBackoff = 0.02;
-constexpr double kEmergencyBackoff = 0.05;
 constexpr double kDirectionEpsilon = 0.002;
 constexpr int kTareSamples = 31;
 constexpr int kTareMaxAttempts = 500;
@@ -698,8 +697,11 @@ private:
           (severe || safety.above_limit_count[i] >= kContactConfirmSamples))
       {
         safety.contact_latched[i] = true;
-        safety.hold_position(i) = std::min(
-            1.0, measured(i) + (severe ? kEmergencyBackoff : kBackoff));
+        // Hold the actuator exactly where contact was detected. Opening it as
+        // an automatic backoff loosens multi-finger grasps as each actuator
+        // reaches the threshold at a different time. The firmware force limit
+        // remains active as the independent overshoot guard.
+        safety.hold_position(i) = measured(i);
       }
 
       if (safety.contact_latched[i])

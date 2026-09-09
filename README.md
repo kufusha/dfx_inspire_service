@@ -114,11 +114,13 @@ sudo ./inspire_g1
 Force protection runs next to the serial driver on the G1, independently of
 the remote DDS round trip. The service configures the hand firmware with
 `SetVelocity` and `SetForce`, reads each actuator through `GetForce`, and
-latches that actuator at contact. A force overshoot commands a small opening
-backoff. If position or force feedback fails, further closure is blocked while
-opening remains available. Startup is observation-only until the first valid
-DDS command arrives; if the command stream times out later, the service holds
-the measured position instead of continuing toward an old closing target.
+latches that actuator at its measured contact position. The hand firmware
+provides the independent force-overshoot guard without automatically reopening
+the actuator and loosening the grasp. If position or force feedback fails,
+further closure is blocked while opening remains available. Startup is
+observation-only until the first valid DDS command arrives; if the command
+stream times out later, the service holds the measured position instead of
+continuing toward an old closing target.
 
 Before using this on a robot:
 
