@@ -38,27 +38,34 @@ public:
 
   ssize_t recv(uint8_t* data, size_t len)
   {
-    FD_ZERO(&rSet_);
-    FD_SET(fd_, &rSet_);
-    ssize_t recv_len = 0;
-    // select(2) may modify the timeval. Use a fresh copy so one timeout does
-    // not turn every subsequent serial read into a non-blocking poll.
-    timeval timeout = timeout_;
+    const auto timeout_duration = std::chrono::seconds(timeout_.tv_sec) +
+        std::chrono::microseconds(timeout_.tv_usec);
+    const auto deadline = std::chrono::steady_clock::now() + timeout_duration;
+    size_t total = 0;
 
-    switch (select(fd_ + 1, &rSet_, NULL, NULL, &timeout))
+    while (total < len)
     {
-    case -1: // error
-      // std::cout << "communication error" << std::endl;
-      break;
-    case 0: // timeout
-      // std::cout << "timeout" << std::endl;
-      break;
-    default:
-      recv_len = ::read(fd_, data, len);
-      break;
-    }
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= deadline)
+        break;
+      const auto remaining =
+          std::chrono::duration_cast<std::chrono::microseconds>(deadline - now);
+      timeval timeout;
+      timeout.tv_sec = remaining.count() / 1000000;
+      timeout.tv_usec = remaining.count() % 1000000;
 
-    return recv_len;
+      FD_ZERO(&rSet_);
+      FD_SET(fd_, &rSet_);
+      const int ready = select(fd_ + 1, &rSet_, NULL, NULL, &timeout);
+      if (ready <= 0)
+        break;
+
+      const ssize_t received = ::read(fd_, data + total, len - total);
+      if (received <= 0)
+        break;
+      total += static_cast<size_t>(received);
+    }
+    return static_cast<ssize_t>(total);
   }
 
   void set_timeout(int timeout_ms)

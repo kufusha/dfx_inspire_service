@@ -389,10 +389,20 @@ private:
       HandVector left_position;
       HandVector right_force;
       HandVector left_force;
-      if (!readBothPositions(right_position, left_position) ||
-          righthand->GetForce(right_force) != 0 ||
-          lefthand->GetForce(left_force) != 0)
+      const int right_position_result =
+          righthand->GetPosition(right_position);
+      const int left_position_result =
+          lefthand->GetPosition(left_position);
+      const int right_force_result = righthand->GetForce(right_force);
+      const int left_force_result = lefthand->GetForce(left_force);
+      if (right_position_result != 0 || left_position_result != 0 ||
+          right_force_result != 0 || left_force_result != 0)
       {
+        std::cerr << "[InspireForce] Protective feedback miss: "
+                  << "right_pos=" << right_position_result
+                  << " left_pos=" << left_position_result
+                  << " right_force=" << right_force_result
+                  << " left_force=" << left_force_result << std::endl;
         // Do not leave the full closing target active when feedback is lost.
         righthand->SetPosition(last_right_position);
         lefthand->SetPosition(last_left_position);

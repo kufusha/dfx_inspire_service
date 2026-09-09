@@ -167,6 +167,8 @@ contact latch is active. Slow baseline drift compensation is enabled only
 while the corresponding actuator is physically open and far below contact.
 Signed negative baseline values are valid sensor offsets. They are subtracted
 in software but never reduce the firmware's requested force threshold.
+Serial responses are accumulated until the complete expected frame arrives or
+the transaction deadline expires, rather than rejecting a split frame.
 
 Do not reuse force calibration coefficients from a different hand. Software
 cannot provide the shutdown pose during power loss, `SIGKILL`, or a hardware
