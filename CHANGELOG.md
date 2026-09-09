@@ -22,6 +22,8 @@
   transaction in protective-pose diagnostics.
 - Allow 20 seconds for low-speed calibration opening and report every final
   actuator position when open verification fails.
+- Permit standalone protective-pose return with a saved baseline and retry
+  moving position feedback before issuing a hold.
 
 ## 1.0.1
 

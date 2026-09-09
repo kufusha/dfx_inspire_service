@@ -47,6 +47,7 @@ constexpr double kTareMaxSpreadG = 50.0;
 constexpr int kProtectivePoseMaxAttempts = 450;
 constexpr double kProtectivePoseTolerance = 0.03;
 constexpr int kProtectiveMaxFeedbackFailures = 3;
+constexpr int kPositionReadRetries = 3;
 
 using HandVector = Eigen::Matrix<double, kDofPerHand, 1>;
 
@@ -154,8 +155,6 @@ public:
       requireHandsOpen();
       tareForceSensors();
       saveForceBaseline();
-      if (param::return_to_protective_pose)
-        moveToProtectivePose();
     }
     else if (!loadForceBaseline())
     {
@@ -165,6 +164,14 @@ public:
       std::cout << "[InspireForce] WARNING: no saved baseline; monitor output "
                    "will show raw force and CONTROL remains unavailable."
                 << std::endl;
+    }
+
+    if (param::return_to_protective_pose)
+    {
+      if (!baseline_valid_)
+        fail("a valid saved force baseline is required for protective-pose "
+             "motion");
+      moveToProtectivePose();
     }
 
     handcmd = std::make_shared<unitree::robot::SubscriptionBase<
@@ -213,6 +220,19 @@ private:
   {
     return righthand->GetPosition(right) == 0 &&
            lefthand->GetPosition(left) == 0;
+  }
+
+  int readPositionWithRetries(
+      inspire::InspireHand& hand, HandVector& position)
+  {
+    int result = 1;
+    for (int attempt = 0; attempt < kPositionReadRetries; ++attempt)
+    {
+      result = hand.GetPosition(position);
+      if (result == 0)
+        return 0;
+    }
+    return result;
   }
 
   void requireHandsOpen()
@@ -425,9 +445,9 @@ private:
       HandVector right_force;
       HandVector left_force;
       const int right_position_result =
-          righthand->GetPosition(right_position);
+          readPositionWithRetries(*righthand, right_position);
       const int left_position_result =
-          lefthand->GetPosition(left_position);
+          readPositionWithRetries(*lefthand, left_position);
       const int right_force_result = righthand->GetForce(right_force);
       const int left_force_result = lefthand->GetForce(left_force);
       if (right_position_result != 0 || left_position_result != 0 ||

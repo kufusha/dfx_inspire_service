@@ -161,6 +161,9 @@ the verified open posture and stable unloaded baseline to accept calibration.
 `--return-to-protective-pose` then closes at raw speed 25 toward
 `[0, 0, 0, 0, 0.270, 0.978]` for each hand. Firmware and software force checks
 limit each actuator to 100 g above its measured baseline during this move.
+Once a baseline has been saved, this option can be run with `--monitor-only`
+without repeating calibration. Position feedback is retried before motion is
+paused so a single corrupt moving-frame response does not inject extra holds.
 
 Diagnostics use `raw/base/net` grams per actuator. `[C]` means that actuator's
 contact latch is active. Slow baseline drift compensation is enabled only

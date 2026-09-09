@@ -79,9 +79,9 @@ po::variables_map helper(int argc, char** argv)
     exit(1);
   }
 
-  if (return_to_protective_pose && !calibrate_force)
+  if (return_to_protective_pose && !monitor_only)
   {
-    spdlog::error("--return-to-protective-pose requires --calibrate-force");
+    spdlog::error("--return-to-protective-pose requires --monitor-only");
     exit(1);
   }
 
