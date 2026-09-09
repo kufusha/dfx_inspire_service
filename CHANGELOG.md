@@ -18,7 +18,7 @@
   so isolated startup transients do not invalidate calibration.
 - Preserve signed sensor offsets and pause protective-pose closure across
   isolated feedback timeouts, failing after repeated loss.
-- Accumulate fragmented serial responses and identify the failed feedback
+- Preserve per-transaction serial timeouts and identify the failed feedback
   transaction in protective-pose diagnostics.
 - Allow 20 seconds for low-speed calibration opening and report every final
   actuator position when open verification fails.

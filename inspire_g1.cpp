@@ -245,9 +245,13 @@ private:
     HandVector right;
     HandVector left;
     bool received_position = false;
+    int right_result = -1;
+    int left_result = -1;
     for (int attempt = 0; attempt < kOpenMaxAttempts; ++attempt)
     {
-      if (readBothPositions(right, left))
+      right_result = righthand->GetPosition(right);
+      left_result = lefthand->GetPosition(left);
+      if (right_result == 0 && left_result == 0)
       {
         received_position = true;
         if (isFullyOpen(right) && isFullyOpen(left))
@@ -264,6 +268,11 @@ private:
                    "(required >= 0.900):" << std::endl;
       printPositionRow("right", right);
       printPositionRow("left", left);
+    }
+    else
+    {
+      std::cerr << "[InspireForce] No complete position feedback: right="
+                << right_result << " left=" << left_result << std::endl;
     }
     fail("hands did not reach the verified open position within 20 seconds");
   }
