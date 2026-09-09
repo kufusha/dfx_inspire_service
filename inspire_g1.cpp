@@ -7,6 +7,47 @@
 #include <unitree/idl/go2/MotorStates_.hpp>
 #include <unitree/common/thread/recurrent_thread.hpp>
 
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstdint>
+#include <functional>
+#include <iostream>
+#include <memory>
+#include <unistd.h>
+
+namespace
+{
+constexpr int kDofPerHand = 6;
+constexpr int kTotalDof = 12;
+constexpr uint8_t kSafetyProtocolMode = 1;
+constexpr uint32_t kSafetyProtocolMagic = 0x494E5350;  // "INSP"
+constexpr double kDefaultForceLimitG = 100.0;
+constexpr double kDefaultClosingSpeed = 25.0;
+constexpr double kDefaultOpeningSpeed = 1000.0;
+constexpr double kBackoff = 0.02;
+constexpr double kEmergencyBackoff = 0.05;
+constexpr double kDirectionEpsilon = 0.002;
+
+using HandVector = Eigen::Matrix<double, kDofPerHand, 1>;
+
+void setVelocity(inspire::InspireHand& hand, const HandVector& value)
+{
+  hand.SetVelocity(
+      static_cast<int16_t>(value(0)), static_cast<int16_t>(value(1)),
+      static_cast<int16_t>(value(2)), static_cast<int16_t>(value(3)),
+      static_cast<int16_t>(value(4)), static_cast<int16_t>(value(5)));
+}
+
+void setForce(inspire::InspireHand& hand, const HandVector& value)
+{
+  hand.SetForce(
+      static_cast<uint16_t>(value(0)), static_cast<uint16_t>(value(1)),
+      static_cast<uint16_t>(value(2)), static_cast<uint16_t>(value(3)),
+      static_cast<uint16_t>(value(4)), static_cast<uint16_t>(value(5)));
+}
+}  // namespace
+
 class InspireRunner
 {
 public:
@@ -15,100 +56,242 @@ public:
     serial1 = std::make_shared<SerialPort>("/dev/ttyUSB1", B115200);
     serial2 = std::make_shared<SerialPort>("/dev/ttyUSB2", B115200);
 
-    // If your left and right hand controls are reversed, you can swap the positions of `serial1` and `serial2` below.
+    // Swap serial1/serial2 here if the physical hands are reversed.
     righthand = std::make_shared<inspire::InspireHand>(serial1, 1);
     lefthand = std::make_shared<inspire::InspireHand>(serial2, 1);
 
-    // dds
-    handcmd = std::make_shared<unitree::robot::SubscriptionBase<unitree_go::msg::dds_::MotorCmds_>>(
-        "rt/" + param::ns + "/cmd");
-    handcmd->msg_.cmds().resize(12);
-    handstate = std::make_unique<unitree::robot::RealTimePublisher<unitree_go::msg::dds_::MotorStates_>>(
-        "rt/" + param::ns + "/state");
-    handstate->msg_.states().resize(12);
+    handcmd = std::make_shared<unitree::robot::SubscriptionBase<
+        unitree_go::msg::dds_::MotorCmds_>>("rt/" + param::ns + "/cmd");
+    handcmd->msg_.cmds().resize(kTotalDof);
+    handstate = std::make_unique<unitree::robot::RealTimePublisher<
+        unitree_go::msg::dds_::MotorStates_>>("rt/" + param::ns + "/state");
+    handstate->msg_.states().resize(kTotalDof);
 
-    // Start running
+    qcmd.setOnes();
+    qstate.setOnes();
+    force_n.setZero();
+    right_.last_velocity.setConstant(-1.0);
+    left_.last_velocity.setConstant(-1.0);
+    right_.last_force_limit_g.setConstant(-1.0);
+    left_.last_force_limit_g.setConstant(-1.0);
+
     thread = std::make_shared<unitree::common::RecurrentThread>(
-      10000, std::bind(&InspireRunner::run, this)
-    );
+        10000, std::bind(&InspireRunner::run, this));
+  }
+
+private:
+  struct HandSafetyState
+  {
+    std::array<bool, kDofPerHand> contact_latched{};
+    HandVector hold_position = HandVector::Ones();
+    HandVector last_velocity = HandVector::Zero();
+    HandVector last_force_limit_g = HandVector::Zero();
+    bool position_valid = false;
+    bool force_valid = false;
+  };
+
+  void readHand(inspire::InspireHand& hand, HandSafetyState& safety, int offset)
+  {
+    HandVector sample;
+    if (hand.GetPosition(sample) == 0)
+    {
+      qstate.block<kDofPerHand, 1>(offset, 0) = sample;
+      safety.position_valid = true;
+    }
+    else
+    {
+      safety.position_valid = false;
+      for (int i = 0; i < kDofPerHand; ++i)
+        handstate->msg_.states()[offset + i].lost()++;
+    }
+
+    if (hand.GetForce(sample) == 0)
+    {
+      force_n.block<kDofPerHand, 1>(offset, 0) = sample.cwiseMax(0.0);
+      safety.force_valid = true;
+    }
+    else
+    {
+      safety.force_valid = false;
+      for (int i = 0; i < kDofPerHand; ++i)
+        handstate->msg_.states()[offset + i].lost()++;
+    }
+  }
+
+  HandVector safeTarget(
+      const HandVector& requested,
+      const HandVector& measured,
+      const HandVector& measured_force_n,
+      const HandVector& force_limit_g,
+      HandSafetyState& safety)
+  {
+    HandVector safe = requested;
+    for (int i = 0; i < kDofPerHand; ++i)
+    {
+      // RH56 position convention: 1=open, 0=closed.
+      const bool opening = requested(i) >= measured(i) - kDirectionEpsilon;
+      if (opening)
+      {
+        safety.contact_latched[i] = false;
+        continue;
+      }
+
+      // Missing feedback must never authorize additional closure.
+      if (!safety.position_valid || !safety.force_valid)
+      {
+        safe(i) = measured(i);
+        continue;
+      }
+
+      const double limit_n = force_limit_g(i) * 9.8 / 1000.0;
+      if (!safety.contact_latched[i] && measured_force_n(i) >= limit_n)
+      {
+        safety.contact_latched[i] = true;
+        const bool severe = measured_force_n(i) >= 1.5 * limit_n;
+        safety.hold_position(i) = std::min(
+            1.0, measured(i) + (severe ? kEmergencyBackoff : kBackoff));
+      }
+
+      if (safety.contact_latched[i])
+        safe(i) = safety.hold_position(i);
+    }
+    return safe.cwiseMax(0.0).cwiseMin(1.0);
+  }
+
+  void commandHand(
+      inspire::InspireHand& hand,
+      HandSafetyState& safety,
+      int offset)
+  {
+    const HandVector requested = qcmd.block<kDofPerHand, 1>(offset, 0);
+    const HandVector measured = qstate.block<kDofPerHand, 1>(offset, 0);
+    const HandVector measured_force = force_n.block<kDofPerHand, 1>(offset, 0);
+    HandVector velocity;
+    HandVector force_limit_g;
+
+    for (int i = 0; i < kDofPerHand; ++i)
+    {
+      const auto& cmd = handcmd->msg_.cmds()[offset + i];
+      const bool extended = cmd.mode() == kSafetyProtocolMode;
+      const bool opening = requested(i) >= measured(i) - kDirectionEpsilon;
+      const double requested_speed = extended ? cmd.dq() : 0.0;
+      const double requested_force = extended ? cmd.tau() : 0.0;
+      velocity(i) = std::clamp(
+          requested_speed > 0.0
+              ? requested_speed
+              : (opening ? kDefaultOpeningSpeed : kDefaultClosingSpeed),
+          1.0, 1000.0);
+      force_limit_g(i) = std::clamp(
+          requested_force > 0.0 ? requested_force : kDefaultForceLimitG,
+          1.0, 1000.0);
+    }
+
+    // Program the firmware limits before sending the position target.
+    if (!velocity.isApprox(safety.last_velocity, 0.5))
+    {
+      setVelocity(hand, velocity);
+      safety.last_velocity = velocity;
+    }
+    if (!force_limit_g.isApprox(safety.last_force_limit_g, 0.5))
+    {
+      setForce(hand, force_limit_g);
+      safety.last_force_limit_g = force_limit_g;
+    }
+
+    hand.SetPosition(safeTarget(
+        requested, measured, measured_force, force_limit_g, safety));
   }
 
   void run()
   {
-    // Set command
-    if(!handcmd->isTimeout())
+    // Read feedback even before the first DDS command so startup is
+    // observation-only and never moves a hand unexpectedly.
+    readHand(*righthand, right_, 0);
+    readHand(*lefthand, left_, kDofPerHand);
+
+    const bool command_fresh =
+        !handcmd->isTimeout() && handcmd->msg_.cmds().size() >= kTotalDof;
+    if (command_fresh)
     {
-      for(int i(0); i<12; i++)
+      for (int i = 0; i < kTotalDof; ++i)
       {
-        qcmd(i) = handcmd->msg_.cmds()[i].q();
+        qcmd(i) = std::clamp(
+            static_cast<double>(handcmd->msg_.cmds()[i].q()), 0.0, 1.0);
       }
-      righthand->SetPosition(qcmd.block<6, 1>(0, 0));
-      lefthand->SetPosition(qcmd.block<6, 1>(6, 0));
+      has_received_command_ = true;
+    }
+    else if (has_received_command_)
+    {
+      // A lost DDS stream must not leave a previous closing target active.
+      qcmd = qstate;
     }
 
-    // Recv state
-    Eigen::Matrix<double, 6, 1> qtemp;
-    if(righthand->GetPosition(qtemp) == 0)
+    // Feedback and protection remain local to avoid PC-to-G1 DDS latency.
+    // Do not issue any position command until a real DDS command has arrived.
+    if (has_received_command_)
     {
-      qstate.block<6, 1>(0, 0) = qtemp;
+      commandHand(*righthand, right_, 0);
+      commandHand(*lefthand, left_, kDofPerHand);
     }
-    else
+
+    if (handstate->trylock())
     {
-      for(int i(0); i<6; i++)
+      for (int i = 0; i < kTotalDof; ++i)
       {
-        handstate->msg_.states()[i].lost()++;
+        auto& state = handstate->msg_.states()[i];
+        const HandSafetyState& safety = i < kDofPerHand ? right_ : left_;
+        state.q() = qstate(i);
+        state.tau_est() = force_n(i);
+        state.mode() = safety.contact_latched[i % kDofPerHand] ? 1 : 0;
+        state.reserve()[0] = kSafetyProtocolMagic;
       }
-      // spdlog::debug("Failed to get right hand state");
+      handstate->unlockAndPublish();
     }
-    if(lefthand->GetPosition(qtemp) == 0)
+
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_diagnostic_ >= std::chrono::seconds(1))
     {
-      qstate.block<6, 1>(6, 0) = qtemp;
-    }
-    else
-    {
-      for(int i(0); i<6; i++)
-      {
-        handstate->msg_.states()[i+6].lost()++;
-      }
-      // spdlog::debug("Failed to get left hand state");
-    }
-    if(handstate->trylock())
-    {
-        for(int i(0); i<12; i++)
-        {
-            handstate->msg_.states()[i].q() = qstate(i);
-        }
-        handstate->unlockAndPublish();
+      std::cout << "[InspireForce] right[N]="
+                << force_n.block<kDofPerHand, 1>(0, 0).transpose()
+                << " left[N]="
+                << force_n.block<kDofPerHand, 1>(kDofPerHand, 0).transpose()
+                << " sensors=" << (right_.force_valid ? "R" : "-")
+                << (left_.force_valid ? "L" : "-") << std::endl;
+      last_diagnostic_ = now;
     }
   }
 
+public:
   unitree::common::ThreadPtr thread;
-
-  // inspire
   SerialPort::SharedPtr serial1;
   SerialPort::SharedPtr serial2;
   std::shared_ptr<inspire::InspireHand> lefthand;
   std::shared_ptr<inspire::InspireHand> righthand;
-  Eigen::Matrix<double, 12, 1> qcmd, qstate;
+  Eigen::Matrix<double, kTotalDof, 1> qcmd;
+  Eigen::Matrix<double, kTotalDof, 1> qstate;
+  Eigen::Matrix<double, kTotalDof, 1> force_n;
+  std::unique_ptr<unitree::robot::RealTimePublisher<
+      unitree_go::msg::dds_::MotorStates_>> handstate;
+  std::shared_ptr<unitree::robot::SubscriptionBase<
+      unitree_go::msg::dds_::MotorCmds_>> handcmd;
 
-  // dds
-  std::unique_ptr<unitree::robot::RealTimePublisher<unitree_go::msg::dds_::MotorStates_>> handstate;
-  std::shared_ptr<unitree::robot::SubscriptionBase<unitree_go::msg::dds_::MotorCmds_>> handcmd;
+private:
+  HandSafetyState right_;
+  HandSafetyState left_;
+  bool has_received_command_ = false;
+  std::chrono::steady_clock::time_point last_diagnostic_{};
 };
 
-int main(int argc, char ** argv)
+int main(int argc, char** argv)
 {
-  auto vm = param::helper(argc, argv);
+  param::helper(argc, argv);
   unitree::robot::ChannelFactory::Instance()->Init(0, param::network);
-
-  std::cout << " --- Unitree Robotics --- " << std::endl;
-  std::cout << "  Inspire Hand Controller  " << std::endl;
-
+  std::cout << " --- Unitree Robotics ---\n"
+            << " Inspire Hand Force-Safe Controller\n"
+            << " Default force limit: " << kDefaultForceLimitG << " g\n"
+            << " Closing speed: " << kDefaultClosingSpeed << " (raw)\n";
   InspireRunner runner;
- 
   while (true)
-  {
     sleep(1);
-  }
   return 0;
 }

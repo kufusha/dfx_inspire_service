@@ -24,7 +24,20 @@ B --rt/inspire/state--> A
 ```
 
 The IDL data is an array containing joint-level values for all 12 motors of both hands.
-Currently the dexterous hand only supports joint control, i.e. only the parameter `q` makes sense in the idl format. The others are reserved.
+The force-safe G1 service keeps `q` position control compatible with the
+original protocol and uses previously reserved fields when `mode=1`:
+
+| Field | Meaning |
+|---|---|
+| `MotorCmd.q` | Position (`1=open`, `0=closed`) |
+| `MotorCmd.dq` | RH56 raw speed (`1..1000`) |
+| `MotorCmd.tau` | Per-actuator force threshold (`1..1000`, nominal grams) |
+| `MotorState.q` | Measured position |
+| `MotorState.tau_est` | Measured force in newtons |
+| `MotorState.mode` | `1` while the local contact latch is active |
+
+Commands without `mode=1` use conservative defaults: closing speed `25`,
+opening speed `1000`, and force threshold `100`.
 
 
 <div style="text-align: center;">
@@ -95,6 +108,30 @@ sudo ./inspire_g1
 # Terminal 2. Run example
 ./hand_example
 ```
+
+### G1 force-safety behavior
+
+Force protection runs next to the serial driver on the G1, independently of
+the remote DDS round trip. The service configures the hand firmware with
+`SetVelocity` and `SetForce`, reads each actuator through `GetForce`, and
+latches that actuator at contact. A force overshoot commands a small opening
+backoff. If position or force feedback fails, further closure is blocked while
+opening remains available. Startup is observation-only until the first valid
+DDS command arrives; if the command stream times out later, the service holds
+the measured position instead of continuing toward an old closing target.
+
+Before using this on a robot:
+
+1. Keep the hand suspended and have an emergency-stop operator ready.
+2. Stop every other process using `/dev/ttyUSB1` and `/dev/ttyUSB2`.
+3. Confirm the one-second `[InspireForce]` values are plausible with no load.
+4. Confirm opening direction before attempting closure.
+5. Test one finger on a soft object at the default threshold.
+6. Measure force externally and calibrate every physical finger separately.
+
+Do not reuse force calibration coefficients from a different hand. Software
+cannot provide the shutdown pose during power loss, `SIGKILL`, or a hardware
+fault.
 
 # FAQ
 1. Error when `make -j6`
