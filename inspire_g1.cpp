@@ -46,6 +46,7 @@ constexpr double kBaselineDriftAlpha = 0.001;
 constexpr double kTareMaxSpreadG = 50.0;
 constexpr int kProtectivePoseMaxAttempts = 450;
 constexpr double kProtectivePoseTolerance = 0.03;
+constexpr int kProtectiveMaxFeedbackFailures = 3;
 
 using HandVector = Eigen::Matrix<double, kDofPerHand, 1>;
 
@@ -56,6 +57,8 @@ const HandVector kProtectivePose =
 
 void printForceRow(const char* side, const HandVector& force_n)
 {
+  const auto old_flags = std::cout.flags();
+  const auto old_precision = std::cout.precision();
   std::cout << "  " << std::left << std::setw(5) << side << std::right;
   for (int i = 0; i < kDofPerHand; ++i)
   {
@@ -63,7 +66,9 @@ void printForceRow(const char* side, const HandVector& force_n)
     std::cout << "  " << kActuatorNames[i] << "="
               << std::fixed << std::setprecision(1) << force_g;
   }
-  std::cout << std::defaultfloat << std::endl;
+  std::cout.flags(old_flags);
+  std::cout.precision(old_precision);
+  std::cout << std::endl;
 }
 
 double median(std::vector<double>& values)
@@ -100,8 +105,8 @@ class InspireRunner
 public:
   InspireRunner()
   {
-    serial1 = std::make_shared<SerialPort>("/dev/ttyUSB1", B115200);
-    serial2 = std::make_shared<SerialPort>("/dev/ttyUSB2", B115200);
+    serial1 = std::make_shared<SerialPort>("/dev/ttyUSB1", B115200, 10);
+    serial2 = std::make_shared<SerialPort>("/dev/ttyUSB2", B115200, 10);
 
     // Swap serial1/serial2 here if the physical hands are reversed.
     righthand = std::make_shared<inspire::InspireHand>(serial1, 1);
@@ -245,7 +250,7 @@ private:
     for (int i = 0; i < kTotalDof; ++i)
     {
       if (!(input >> force_offset_n(i)) || !std::isfinite(force_offset_n(i)) ||
-          force_offset_n(i) < 0.0 || force_offset_n(i) > 9.8)
+          force_offset_n(i) < -9.8 || force_offset_n(i) > 9.8)
         return false;
     }
     baseline_valid_ = true;
@@ -357,11 +362,14 @@ private:
     for (int i = 0; i < kDofPerHand; ++i)
     {
       right_limit(i) = std::clamp(
-          kDefaultForceLimitG + force_offset_n(i) * 1000.0 / 9.8,
+          kDefaultForceLimitG +
+              std::max(0.0, force_offset_n(i) * 1000.0 / 9.8),
           1.0, 1000.0);
       left_limit(i) = std::clamp(
           kDefaultForceLimitG +
-              force_offset_n(kDofPerHand + i) * 1000.0 / 9.8,
+              std::max(
+                  0.0,
+                  force_offset_n(kDofPerHand + i) * 1000.0 / 9.8),
           1.0, 1000.0);
     }
     setVelocity(*righthand, speed);
@@ -373,6 +381,8 @@ private:
 
     HandVector last_right_position = HandVector::Ones();
     HandVector last_left_position = HandVector::Ones();
+    int consecutive_feedback_failures = 0;
+    bool closing_paused = false;
     for (int attempt = 0; attempt < kProtectivePoseMaxAttempts; ++attempt)
     {
       HandVector right_position;
@@ -386,10 +396,22 @@ private:
         // Do not leave the full closing target active when feedback is lost.
         righthand->SetPosition(last_right_position);
         lefthand->SetPosition(last_left_position);
-        fail("feedback was lost while returning to the protective pose");
+        closing_paused = true;
+        if (++consecutive_feedback_failures >= kProtectiveMaxFeedbackFailures)
+          fail("feedback was repeatedly lost while returning to the "
+               "protective pose");
+        usleep(100000);
+        continue;
       }
+      consecutive_feedback_failures = 0;
       last_right_position = right_position;
       last_left_position = left_position;
+      if (closing_paused)
+      {
+        righthand->SetPosition(right_target);
+        lefthand->SetPosition(left_target);
+        closing_paused = false;
+      }
 
       bool target_changed = false;
       for (int i = 0; i < kDofPerHand; ++i)
@@ -439,6 +461,8 @@ private:
       std::cout << "  " << side << "  unavailable" << std::endl;
       return;
     }
+    const auto old_flags = std::cout.flags();
+    const auto old_precision = std::cout.precision();
     std::cout << "  " << std::left << std::setw(5) << side << std::right;
     for (int i = 0; i < kDofPerHand; ++i)
     {
@@ -452,7 +476,9 @@ private:
                 << raw_g << "/" << baseline_g << "/" << net_g
                 << (safety.contact_latched[i] ? "[C]" : "");
     }
-    std::cout << std::defaultfloat << std::endl;
+    std::cout.flags(old_flags);
+    std::cout.precision(old_precision);
+    std::cout << std::endl;
   }
 
   void readHand(inspire::InspireHand& hand, HandSafetyState& safety, int offset)
@@ -472,7 +498,6 @@ private:
 
     if (hand.GetForce(sample) == 0)
     {
-      sample = sample.cwiseMax(0.0);
       raw_force_n.block<kDofPerHand, 1>(offset, 0) = sample;
       if (baseline_valid_)
       {
@@ -497,7 +522,7 @@ private:
       }
       else
       {
-        force_n.block<kDofPerHand, 1>(offset, 0) = sample;
+        force_n.block<kDofPerHand, 1>(offset, 0) = sample.cwiseMax(0.0);
       }
       safety.force_valid = true;
     }
@@ -586,7 +611,8 @@ private:
       // FORCE_SET uses the sensor's absolute reading. Add the measured
       // no-load offset so its threshold matches our offset-corrected limit.
       device_force_limit_g(i) = std::clamp(
-          force_limit_g(i) + force_offset_n(offset + i) * 1000.0 / 9.8,
+          force_limit_g(i) + std::max(
+              0.0, force_offset_n(offset + i) * 1000.0 / 9.8),
           1.0, 1000.0);
     }
 

@@ -16,6 +16,8 @@
   calibration.
 - Wait for post-calibration settling and use a rolling stable window for tare
   so isolated startup transients do not invalidate calibration.
+- Preserve signed sensor offsets and pause protective-pose closure across
+  isolated feedback timeouts, failing after repeated loss.
 
 ## 1.0.1
 
