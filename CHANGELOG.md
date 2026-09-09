@@ -7,6 +7,10 @@
 - Block additional closure when feedback is unavailable and back off after
   contact-force overshoot.
 - Add unloaded force calibration and state-only monitoring CLI modes.
+- Add verified low-speed opening, persistent median force baselines, filtered
+  contact confirmation, and open-state-only drift compensation.
+- Validate force-calibration acknowledgements and preserve serial read
+  timeouts across repeated transactions.
 
 ## 1.0.1
 

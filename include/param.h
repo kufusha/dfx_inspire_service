@@ -18,6 +18,8 @@ inline std::string ns;
 inline float threhold;
 inline bool calibrate_force = false;
 inline bool monitor_only = false;
+inline bool open_before_calibration = false;
+inline std::string force_baseline_file;
 
 po::variables_map helper(int argc, char** argv)
 {
@@ -38,6 +40,11 @@ po::variables_map helper(int argc, char** argv)
       "calibrate both force sensors before starting (hands must be unloaded)")
     ("monitor-only", po::bool_switch(&monitor_only),
       "publish position/force state but ignore all DDS commands")
+    ("open-before-calibration", po::bool_switch(&open_before_calibration),
+      "slowly open both hands before force calibration")
+    ("force-baseline-file", po::value<std::string>(&force_baseline_file)->
+      default_value("/var/lib/dfx_inspire_service/force_baseline.txt"),
+      "path used to save/load the unloaded force baseline")
     ;
 
   po::variables_map vm;
@@ -60,6 +67,12 @@ po::variables_map helper(int argc, char** argv)
   {
     spdlog::error("--calibrate-force requires --monitor-only so calibration "
                   "cannot be followed by motion commands");
+    exit(1);
+  }
+
+  if (open_before_calibration && !calibrate_force)
+  {
+    spdlog::error("--open-before-calibration requires --calibrate-force");
     exit(1);
   }
 

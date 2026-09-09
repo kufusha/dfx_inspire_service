@@ -10,11 +10,16 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <cstdint>
+#include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <vector>
 #include <unistd.h>
 
 namespace
@@ -29,6 +34,15 @@ constexpr double kDefaultOpeningSpeed = 1000.0;
 constexpr double kBackoff = 0.02;
 constexpr double kEmergencyBackoff = 0.05;
 constexpr double kDirectionEpsilon = 0.002;
+constexpr int kTareSamples = 31;
+constexpr int kTareMaxAttempts = 200;
+constexpr double kCalibrationOpenPosition = 0.90;
+constexpr double kCalibrationOpeningSpeed = 100.0;
+constexpr int kOpenMaxAttempts = 100;
+constexpr int kContactConfirmSamples = 3;
+constexpr double kForceFilterAlpha = 0.35;
+constexpr double kBaselineDriftAlpha = 0.001;
+constexpr double kTareMaxSpreadG = 50.0;
 
 using HandVector = Eigen::Matrix<double, kDofPerHand, 1>;
 
@@ -45,6 +59,18 @@ void printForceRow(const char* side, const HandVector& force_n)
               << std::fixed << std::setprecision(1) << force_g;
   }
   std::cout << std::defaultfloat << std::endl;
+}
+
+double median(std::vector<double>& values)
+{
+  const auto middle = values.begin() + values.size() / 2;
+  std::nth_element(values.begin(), middle, values.end());
+  return *middle;
+}
+
+bool isFullyOpen(const HandVector& position)
+{
+  return (position.array() >= kCalibrationOpenPosition).all();
 }
 
 void setVelocity(inspire::InspireHand& hand, const HandVector& value)
@@ -76,15 +102,44 @@ public:
     righthand = std::make_shared<inspire::InspireHand>(serial1, 1);
     lefthand = std::make_shared<inspire::InspireHand>(serial2, 1);
 
+    qcmd.setOnes();
+    qstate.setOnes();
+    raw_force_n.setZero();
+    force_n.setZero();
+    force_offset_n.setZero();
+    right_.last_velocity.setConstant(-1.0);
+    left_.last_velocity.setConstant(-1.0);
+    right_.last_force_limit_g.setConstant(-1.0);
+    left_.last_force_limit_g.setConstant(-1.0);
+
     if (param::calibrate_force)
     {
+      if (param::open_before_calibration)
+        openHandsForCalibration();
+      else
+        requireHandsOpen();
+
       std::cout << "[InspireForce] Starting unloaded right-hand calibration "
                    "(about 10 seconds)..." << std::endl;
-      righthand->Calibration();
+      if (righthand->Calibration() != 0)
+        fail("right hand rejected the force-calibration command");
       std::cout << "[InspireForce] Starting unloaded left-hand calibration "
                    "(about 10 seconds)..." << std::endl;
-      lefthand->Calibration();
+      if (lefthand->Calibration() != 0)
+        fail("left hand rejected the force-calibration command");
       std::cout << "[InspireForce] Calibration completed." << std::endl;
+      requireHandsOpen();
+      tareForceSensors();
+      saveForceBaseline();
+    }
+    else if (!loadForceBaseline())
+    {
+      if (!param::monitor_only)
+        fail("no valid force baseline; run --calibrate-force "
+             "--open-before-calibration --monitor-only first");
+      std::cout << "[InspireForce] WARNING: no saved baseline; monitor output "
+                   "will show raw force and CONTROL remains unavailable."
+                << std::endl;
     }
 
     handcmd = std::make_shared<unitree::robot::SubscriptionBase<
@@ -94,14 +149,6 @@ public:
         unitree_go::msg::dds_::MotorStates_>>("rt/" + param::ns + "/state");
     handstate->msg_.states().resize(kTotalDof);
 
-    qcmd.setOnes();
-    qstate.setOnes();
-    force_n.setZero();
-    right_.last_velocity.setConstant(-1.0);
-    left_.last_velocity.setConstant(-1.0);
-    right_.last_force_limit_g.setConstant(-1.0);
-    left_.last_force_limit_g.setConstant(-1.0);
-
     thread = std::make_shared<unitree::common::RecurrentThread>(
         10000, std::bind(&InspireRunner::run, this));
   }
@@ -110,12 +157,192 @@ private:
   struct HandSafetyState
   {
     std::array<bool, kDofPerHand> contact_latched{};
+    std::array<int, kDofPerHand> above_limit_count{};
     HandVector hold_position = HandVector::Ones();
     HandVector last_velocity = HandVector::Zero();
     HandVector last_force_limit_g = HandVector::Zero();
     bool position_valid = false;
     bool force_valid = false;
   };
+
+  [[noreturn]] void fail(const std::string& message)
+  {
+    std::cerr << "[InspireForce] ERROR: " << message << std::endl;
+    std::exit(1);
+  }
+
+  bool readBothPositions(HandVector& right, HandVector& left)
+  {
+    return righthand->GetPosition(right) == 0 &&
+           lefthand->GetPosition(left) == 0;
+  }
+
+  void requireHandsOpen()
+  {
+    HandVector right;
+    HandVector left;
+    for (int attempt = 0; attempt < 10; ++attempt)
+    {
+      if (readBothPositions(right, left))
+      {
+        if (!isFullyOpen(right) || !isFullyOpen(left))
+          fail("force calibration requires both hands fully open; use "
+               "--open-before-calibration after clearing the workspace");
+        return;
+      }
+    }
+    fail("could not verify hand positions before force calibration");
+  }
+
+  void openHandsForCalibration()
+  {
+    std::cout << "[InspireForce] WARNING: opening both hands for calibration. "
+                 "Keep the workspace clear." << std::endl;
+    HandVector speed = HandVector::Constant(kCalibrationOpeningSpeed);
+    setVelocity(*righthand, speed);
+    setVelocity(*lefthand, speed);
+    righthand->SetPosition(HandVector::Ones());
+    lefthand->SetPosition(HandVector::Ones());
+
+    HandVector right;
+    HandVector left;
+    for (int attempt = 0; attempt < kOpenMaxAttempts; ++attempt)
+    {
+      if (readBothPositions(right, left) &&
+          isFullyOpen(right) && isFullyOpen(left))
+      {
+        std::cout << "[InspireForce] Both hands verified open." << std::endl;
+        return;
+      }
+      usleep(100000);
+    }
+    fail("hands did not reach the verified open position within 10 seconds");
+  }
+
+  bool loadForceBaseline()
+  {
+    std::ifstream input(param::force_baseline_file);
+    if (!input)
+      return false;
+    for (int i = 0; i < kTotalDof; ++i)
+    {
+      if (!(input >> force_offset_n(i)) || !std::isfinite(force_offset_n(i)) ||
+          force_offset_n(i) < 0.0 || force_offset_n(i) > 9.8)
+        return false;
+    }
+    baseline_valid_ = true;
+    std::cout << "[InspireForce] Loaded unloaded baseline from "
+              << param::force_baseline_file << std::endl;
+    printForceRow("right", force_offset_n.block<kDofPerHand, 1>(0, 0));
+    printForceRow(
+        "left", force_offset_n.block<kDofPerHand, 1>(kDofPerHand, 0));
+    return true;
+  }
+
+  void saveForceBaseline()
+  {
+    const std::filesystem::path path(param::force_baseline_file);
+    std::error_code error;
+    if (path.has_parent_path())
+      std::filesystem::create_directories(path.parent_path(), error);
+    if (error)
+      fail("could not create baseline directory: " + error.message());
+
+    const auto temporary = path.string() + ".tmp";
+    std::ofstream output(temporary, std::ios::trunc);
+    if (!output)
+      fail("could not write force baseline: " + temporary);
+    output << std::setprecision(17);
+    for (int i = 0; i < kTotalDof; ++i)
+      output << force_offset_n(i) << (i + 1 == kTotalDof ? '\n' : ' ');
+    output.close();
+    if (!output)
+      fail("failed while writing force baseline: " + temporary);
+    std::filesystem::rename(temporary, path, error);
+    if (error)
+      fail("could not install force baseline: " + error.message());
+    std::cout << "[InspireForce] Saved unloaded baseline to " << path
+              << std::endl;
+  }
+
+  void tareForceSensors()
+  {
+    std::array<std::vector<double>, kTotalDof> samples;
+    int right_count = 0;
+    int left_count = 0;
+
+    std::cout << "[InspireForce] Measuring unloaded force baseline..." << std::endl;
+    for (int attempt = 0;
+         attempt < kTareMaxAttempts &&
+             (right_count < kTareSamples || left_count < kTareSamples);
+         ++attempt)
+    {
+      HandVector sample;
+      if (right_count < kTareSamples && righthand->GetForce(sample) == 0)
+      {
+        for (int i = 0; i < kDofPerHand; ++i)
+          samples[i].push_back(sample(i));
+        ++right_count;
+      }
+      if (left_count < kTareSamples && lefthand->GetForce(sample) == 0)
+      {
+        for (int i = 0; i < kDofPerHand; ++i)
+          samples[kDofPerHand + i].push_back(sample(i));
+        ++left_count;
+      }
+    }
+
+    if (right_count < kTareSamples || left_count < kTareSamples)
+    {
+      std::cerr << "[InspireForce] ERROR: could not collect a reliable force "
+                   "baseline (right=" << right_count << "/" << kTareSamples
+                << ", left=" << left_count << "/" << kTareSamples << ")"
+                << std::endl;
+      std::exit(1);
+    }
+
+    for (int i = 0; i < kTotalDof; ++i)
+    {
+      const auto [minimum, maximum] =
+          std::minmax_element(samples[i].begin(), samples[i].end());
+      const double spread_g = (*maximum - *minimum) * 1000.0 / 9.8;
+      if (spread_g > kTareMaxSpreadG)
+        fail(std::string("force changed during baseline capture for ") +
+             (i < kDofPerHand ? "right " : "left ") +
+             kActuatorNames[i % kDofPerHand] + "; keep hands unloaded");
+      force_offset_n(i) = median(samples[i]);
+    }
+    baseline_valid_ = true;
+
+    std::cout << "[InspireForce] Unloaded baseline captured:" << std::endl;
+    printForceRow("right", force_offset_n.block<kDofPerHand, 1>(0, 0));
+    printForceRow(
+        "left", force_offset_n.block<kDofPerHand, 1>(kDofPerHand, 0));
+  }
+
+  void printDiagnosticRow(
+      const char* side, int offset, const HandSafetyState& safety)
+  {
+    if (!safety.force_valid)
+    {
+      std::cout << "  " << side << "  unavailable" << std::endl;
+      return;
+    }
+    std::cout << "  " << std::left << std::setw(5) << side << std::right;
+    for (int i = 0; i < kDofPerHand; ++i)
+    {
+      const int index = offset + i;
+      const double raw_g = raw_force_n(index) * 1000.0 / 9.8;
+      const double baseline_g = baseline_valid_
+          ? force_offset_n(index) * 1000.0 / 9.8 : 0.0;
+      const double net_g = force_n(index) * 1000.0 / 9.8;
+      std::cout << "  " << kActuatorNames[i] << "="
+                << std::fixed << std::setprecision(0)
+                << raw_g << "/" << baseline_g << "/" << net_g
+                << (safety.contact_latched[i] ? "[C]" : "");
+    }
+    std::cout << std::defaultfloat << std::endl;
+  }
 
   void readHand(inspire::InspireHand& hand, HandSafetyState& safety, int offset)
   {
@@ -134,7 +361,33 @@ private:
 
     if (hand.GetForce(sample) == 0)
     {
-      force_n.block<kDofPerHand, 1>(offset, 0) = sample.cwiseMax(0.0);
+      sample = sample.cwiseMax(0.0);
+      raw_force_n.block<kDofPerHand, 1>(offset, 0) = sample;
+      if (baseline_valid_)
+      {
+        for (int i = 0; i < kDofPerHand; ++i)
+        {
+          const int index = offset + i;
+          const double net_n = std::max(0.0, sample(i) - force_offset_n(index));
+          // Adapt only while physically open and far below contact. This
+          // tracks slow thermal drift without learning an object as zero.
+          if (qstate(index) >= kCalibrationOpenPosition &&
+              !safety.contact_latched[i] &&
+              net_n < kDefaultForceLimitG * 9.8 / 1000.0 * 0.2)
+          {
+            force_offset_n(index) +=
+                kBaselineDriftAlpha * (sample(i) - force_offset_n(index));
+          }
+          const double corrected =
+              std::max(0.0, sample(i) - force_offset_n(index));
+          force_n(index) = kForceFilterAlpha * corrected +
+              (1.0 - kForceFilterAlpha) * force_n(index);
+        }
+      }
+      else
+      {
+        force_n.block<kDofPerHand, 1>(offset, 0) = sample;
+      }
       safety.force_valid = true;
     }
     else
@@ -160,6 +413,7 @@ private:
       if (opening)
       {
         safety.contact_latched[i] = false;
+        safety.above_limit_count[i] = 0;
         continue;
       }
 
@@ -171,10 +425,16 @@ private:
       }
 
       const double limit_n = force_limit_g(i) * 9.8 / 1000.0;
-      if (!safety.contact_latched[i] && measured_force_n(i) >= limit_n)
+      const bool severe = measured_force_n(i) >= 1.5 * limit_n;
+      if (measured_force_n(i) >= limit_n)
+        ++safety.above_limit_count[i];
+      else
+        safety.above_limit_count[i] = 0;
+
+      if (!safety.contact_latched[i] &&
+          (severe || safety.above_limit_count[i] >= kContactConfirmSamples))
       {
         safety.contact_latched[i] = true;
-        const bool severe = measured_force_n(i) >= 1.5 * limit_n;
         safety.hold_position(i) = std::min(
             1.0, measured(i) + (severe ? kEmergencyBackoff : kBackoff));
       }
@@ -195,6 +455,7 @@ private:
     const HandVector measured_force = force_n.block<kDofPerHand, 1>(offset, 0);
     HandVector velocity;
     HandVector force_limit_g;
+    HandVector device_force_limit_g;
 
     for (int i = 0; i < kDofPerHand; ++i)
     {
@@ -211,6 +472,11 @@ private:
       force_limit_g(i) = std::clamp(
           requested_force > 0.0 ? requested_force : kDefaultForceLimitG,
           1.0, 1000.0);
+      // FORCE_SET uses the sensor's absolute reading. Add the measured
+      // no-load offset so its threshold matches our offset-corrected limit.
+      device_force_limit_g(i) = std::clamp(
+          force_limit_g(i) + force_offset_n(offset + i) * 1000.0 / 9.8,
+          1.0, 1000.0);
     }
 
     // Program the firmware limits before sending the position target.
@@ -219,10 +485,10 @@ private:
       setVelocity(hand, velocity);
       safety.last_velocity = velocity;
     }
-    if (!force_limit_g.isApprox(safety.last_force_limit_g, 0.5))
+    if (!device_force_limit_g.isApprox(safety.last_force_limit_g, 0.5))
     {
-      setForce(hand, force_limit_g);
-      safety.last_force_limit_g = force_limit_g;
+      setForce(hand, device_force_limit_g);
+      safety.last_force_limit_g = device_force_limit_g;
     }
 
     hand.SetPosition(safeTarget(
@@ -278,15 +544,13 @@ private:
     const auto now = std::chrono::steady_clock::now();
     if (now - last_diagnostic_ >= std::chrono::seconds(1))
     {
-      std::cout << "[InspireForce] force[g]  sensors="
+      std::cout << "[InspireForce] force[g] raw/base/net  sensors="
                 << (right_.force_valid ? "R" : "-")
                 << (left_.force_valid ? "L" : "-")
                 << "  mode=" << (param::monitor_only ? "MONITOR" : "CONTROL")
                 << std::endl;
-      printForceRow(
-          "right", force_n.block<kDofPerHand, 1>(0, 0));
-      printForceRow(
-          "left", force_n.block<kDofPerHand, 1>(kDofPerHand, 0));
+      printDiagnosticRow("right", 0, right_);
+      printDiagnosticRow("left", kDofPerHand, left_);
       last_diagnostic_ = now;
     }
   }
@@ -299,7 +563,10 @@ public:
   std::shared_ptr<inspire::InspireHand> righthand;
   Eigen::Matrix<double, kTotalDof, 1> qcmd;
   Eigen::Matrix<double, kTotalDof, 1> qstate;
+  Eigen::Matrix<double, kTotalDof, 1> raw_force_n;
   Eigen::Matrix<double, kTotalDof, 1> force_n;
+  Eigen::Matrix<double, kTotalDof, 1> force_offset_n =
+      Eigen::Matrix<double, kTotalDof, 1>::Zero();
   std::unique_ptr<unitree::robot::RealTimePublisher<
       unitree_go::msg::dds_::MotorStates_>> handstate;
   std::shared_ptr<unitree::robot::SubscriptionBase<
@@ -308,6 +575,7 @@ public:
 private:
   HandSafetyState right_;
   HandSafetyState left_;
+  bool baseline_valid_ = false;
   bool has_received_command_ = false;
   std::chrono::steady_clock::time_point last_diagnostic_{};
 };

@@ -41,8 +41,11 @@ public:
     FD_ZERO(&rSet_);
     FD_SET(fd_, &rSet_);
     ssize_t recv_len = 0;
+    // select(2) may modify the timeval. Use a fresh copy so one timeout does
+    // not turn every subsequent serial read into a non-blocking poll.
+    timeval timeout = timeout_;
 
-    switch (select(fd_ + 1, &rSet_, NULL, NULL, &timeout_))
+    switch (select(fd_ + 1, &rSet_, NULL, NULL, &timeout))
     {
     case -1: // error
       // std::cout << "communication error" << std::endl;

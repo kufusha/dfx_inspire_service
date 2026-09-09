@@ -134,13 +134,25 @@ finger and run:
 
 ```bash
 sudo ./build/inspire_g1 --network eth0 --namespace inspire \
-  --calibrate-force --monitor-only
+  --calibrate-force --open-before-calibration --monitor-only
 ```
 
-Calibration runs sequentially and takes about 20 seconds in total. Do not
-touch, support, or load either hand until `Calibration completed` appears.
+The explicit open option moves both hands slowly and verifies their position
+before calibration. Clear the workspace first. Calibration then runs
+sequentially and takes about 20 seconds in total. Do not touch, support, or
+load either hand until `Unloaded baseline captured` appears.
 Afterward, the process remains in monitor-only mode and prints force feedback;
-restart it without these two flags for normal control.
+restart it without the calibration flags for normal control.
+
+Calibration captures a per-actuator unloaded median baseline and saves it to
+`/var/lib/dfx_inspire_service/force_baseline.txt`. Reported force and software
+contact limits use force above that baseline; the firmware force threshold is
+shifted by the same offset. Normal control refuses to start without a valid
+saved baseline. Use `--force-baseline-file PATH` to select another location.
+
+Diagnostics use `raw/base/net` grams per actuator. `[C]` means that actuator's
+contact latch is active. Slow baseline drift compensation is enabled only
+while the corresponding actuator is physically open and far below contact.
 
 Do not reuse force calibration coefficients from a different hand. Software
 cannot provide the shutdown pose during power loss, `SIGKILL`, or a hardware

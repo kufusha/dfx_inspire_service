@@ -224,20 +224,38 @@ public:
    * 
    * @attention The Inspire Hand must be in an unloaded state during calibration
    */
-  void Calibration()
+  int16_t Calibration()
   {
     std::vector<uint8_t> cmd = {0xEB, 0x90, id, 0x04, 0x12, 0x2F, 0x06, 0x01, 0x00};
     cmd.back() = CheckSum(cmd.data(), cmd.size());
-    serial_->send(cmd.data(), cmd.size());
+    if (serial_->send(cmd.data(), cmd.size()) !=
+        static_cast<ssize_t>(cmd.size()))
+      return 1;
 
     usleep(5000);
-    serial_->recv(recvBuff, 9); // First frame
+    const size_t first_len = serial_->recv(recvBuff, 9); // Acknowledgement
+    if (!ValidWriteResponse(recvBuff, first_len, 0x2F, 0x06))
+      return 2;
     sleep(10); // The calibration process takes about 6 seconds
-    serial_->recv(recvBuff, 9); // Second frame
+    serial_->recv(recvBuff, 9); // Optional completion frame (firmware-dependent)
+    return 0;
   }
 
   uint8_t id = 1;
 private:
+  bool ValidWriteResponse(
+      const uint8_t* data, size_t len, uint8_t address_low,
+      uint8_t address_high)
+  {
+    if (len != 9 || data[8] != CheckSum(data, len))
+      return false;
+    const bool valid_header =
+        (data[0] == 0x90 && data[1] == 0xEB) ||
+        (data[0] == 0xEB && data[1] == 0x90);
+    return valid_header && data[2] == id && data[4] == 0x12 &&
+           data[5] == address_low && data[6] == address_high;
+  }
+
   uint8_t CheckSum(const uint8_t* data, uint8_t len)
   {
     uint8_t sum = 0;
