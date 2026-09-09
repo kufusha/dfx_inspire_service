@@ -12,7 +12,7 @@
 #include <iostream>
 #include <memory>
 #include <chrono>
-#include <queue>
+#include <deque>
 
 class SerialPort
 {
@@ -55,16 +55,47 @@ public:
     return received;
   }
 
-  ssize_t recvExact(uint8_t* data, size_t len, int timeout_ms = 50)
+  ssize_t recvFrame(uint8_t* data, size_t expected_len, int timeout_ms = 50)
   {
     const auto deadline = std::chrono::steady_clock::now() +
         std::chrono::milliseconds(timeout_ms);
-    size_t total = 0;
-    while (total < len)
+    while (std::chrono::steady_clock::now() < deadline)
     {
+      while (recv_queue.size() >= 2 &&
+             !((recv_queue[0] == 0x90 && recv_queue[1] == 0xEB) ||
+               (recv_queue[0] == 0xEB && recv_queue[1] == 0x90)))
+        recv_queue.pop_front();
+
+      if (recv_queue.size() >= 4)
+      {
+        const size_t frame_len = static_cast<size_t>(recv_queue[3]) + 5;
+        if (frame_len < 9 || frame_len > recv_buf.size())
+        {
+          recv_queue.pop_front();
+          continue;
+        }
+        if (recv_queue.size() >= frame_len)
+        {
+          uint8_t checksum = 0;
+          for (size_t i = 2; i + 1 < frame_len; ++i)
+            checksum += recv_queue[i];
+          const bool valid = checksum == recv_queue[frame_len - 1];
+          if (valid && frame_len == expected_len)
+          {
+            for (size_t i = 0; i < frame_len; ++i)
+            {
+              data[i] = recv_queue.front();
+              recv_queue.pop_front();
+            }
+            return static_cast<ssize_t>(frame_len);
+          }
+          for (size_t i = 0; i < frame_len; ++i)
+            recv_queue.pop_front();
+          continue;
+        }
+      }
+
       const auto now = std::chrono::steady_clock::now();
-      if (now >= deadline)
-        break;
       const auto remaining =
           std::chrono::duration_cast<std::chrono::microseconds>(deadline - now);
       timeval timeout;
@@ -74,12 +105,13 @@ public:
       FD_SET(fd_, &rSet_);
       if (select(fd_ + 1, &rSet_, NULL, NULL, &timeout) <= 0)
         break;
-      const ssize_t received = ::read(fd_, data + total, len - total);
+      const ssize_t received = ::read(fd_, recv_buf.data(), recv_buf.size());
       if (received <= 0)
         break;
-      total += static_cast<size_t>(received);
+      recv_queue.insert(
+          recv_queue.end(), recv_buf.begin(), recv_buf.begin() + received);
     }
-    return static_cast<ssize_t>(total);
+    return 0;
   }
 
   void set_timeout(int timeout_ms)
@@ -127,10 +159,10 @@ private:
   }
 
   int fd_;
-	fd_set rSet_;
+  fd_set rSet_;
   timeval timeout_;
 
-  std::queue<uint8_t> recv_queue;
+  std::deque<uint8_t> recv_queue;
   std::array<uint8_t, 1024> recv_buf;
 };
 
