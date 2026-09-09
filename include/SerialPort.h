@@ -55,6 +55,33 @@ public:
     return received;
   }
 
+  ssize_t recvExact(uint8_t* data, size_t len, int timeout_ms = 50)
+  {
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(timeout_ms);
+    size_t total = 0;
+    while (total < len)
+    {
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= deadline)
+        break;
+      const auto remaining =
+          std::chrono::duration_cast<std::chrono::microseconds>(deadline - now);
+      timeval timeout;
+      timeout.tv_sec = remaining.count() / 1000000;
+      timeout.tv_usec = remaining.count() % 1000000;
+      FD_ZERO(&rSet_);
+      FD_SET(fd_, &rSet_);
+      if (select(fd_ + 1, &rSet_, NULL, NULL, &timeout) <= 0)
+        break;
+      const ssize_t received = ::read(fd_, data + total, len - total);
+      if (received <= 0)
+        break;
+      total += static_cast<size_t>(received);
+    }
+    return static_cast<ssize_t>(total);
+  }
+
   void set_timeout(int timeout_ms)
   {
     timeout_.tv_sec = timeout_ms / 1000;

@@ -83,7 +83,7 @@ public:
     serial_->send(cmd.data(), cmd.size());
 
     usleep(5000);
-    size_t len = serial_->recv(recvBuff, 20);
+    size_t len = serial_->recvExact(recvBuff, 20);
 
     if(len != 20) return 1;
     if(recvBuff[19] != CheckSum(recvBuff, 20)) return 2;
@@ -180,7 +180,7 @@ public:
     serial_->send(cmd.data(), cmd.size());
 
     usleep(5000);
-    size_t len = serial_->recv(recvBuff, 20);
+    size_t len = serial_->recvExact(recvBuff, 20);
 
     if(len != 20) return 1;
     if(recvBuff[19] != CheckSum(recvBuff, 20)) return 2;
