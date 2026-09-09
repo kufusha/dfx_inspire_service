@@ -48,6 +48,11 @@ constexpr int kProtectivePoseMaxAttempts = 450;
 constexpr double kProtectivePoseTolerance = 0.03;
 constexpr int kProtectiveMaxFeedbackFailures = 3;
 constexpr int kPositionReadRetries = 3;
+constexpr int kProtectivePreflightStableSamples = 5;
+constexpr int kProtectivePreflightMaxAttempts = 100;
+constexpr double kProtectivePreflightMaxNetForceG = 50.0;
+constexpr int kProtectiveContactConfirmSamples = 3;
+constexpr int kProtectiveReachedStableSamples = 10;
 
 using HandVector = Eigen::Matrix<double, kDofPerHand, 1>;
 
@@ -431,13 +436,55 @@ private:
     setVelocity(*lefthand, speed);
     setForce(*righthand, right_limit);
     setForce(*lefthand, left_limit);
-    righthand->SetPosition(right_target);
-    lefthand->SetPosition(left_target);
 
     HandVector last_right_position = HandVector::Ones();
     HandVector last_left_position = HandVector::Ones();
+    int preflight_stable_samples = 0;
+    std::cout << "[InspireForce] Waiting for stable unloaded force feedback "
+                 "before closing..." << std::endl;
+    for (int attempt = 0; attempt < kProtectivePreflightMaxAttempts; ++attempt)
+    {
+      HandVector right_force;
+      HandVector left_force;
+      const bool feedback_valid =
+          readPositionWithRetries(*righthand, last_right_position) == 0 &&
+          readPositionWithRetries(*lefthand, last_left_position) == 0 &&
+          righthand->GetForce(right_force) == 0 &&
+          lefthand->GetForce(left_force) == 0;
+      bool unloaded = feedback_valid;
+      if (feedback_valid)
+      {
+        for (int i = 0; i < kDofPerHand; ++i)
+        {
+          const double right_net_g = std::abs(
+              right_force(i) - force_offset_n(i)) * 1000.0 / 9.8;
+          const double left_net_g = std::abs(
+              left_force(i) - force_offset_n(kDofPerHand + i)) *
+              1000.0 / 9.8;
+          if (right_net_g > kProtectivePreflightMaxNetForceG ||
+              left_net_g > kProtectivePreflightMaxNetForceG)
+          {
+            unloaded = false;
+            break;
+          }
+        }
+      }
+      preflight_stable_samples = unloaded ? preflight_stable_samples + 1 : 0;
+      if (preflight_stable_samples >= kProtectivePreflightStableSamples)
+        break;
+      usleep(100000);
+    }
+    if (preflight_stable_samples < kProtectivePreflightStableSamples)
+      fail("force feedback did not stabilize before protective-pose motion");
+
+    righthand->SetPosition(right_target);
+    lefthand->SetPosition(left_target);
+
     int consecutive_feedback_failures = 0;
     bool closing_paused = false;
+    std::array<int, kDofPerHand> right_contact_count{};
+    std::array<int, kDofPerHand> left_contact_count{};
+    int reached_stable_samples = 0;
     for (int attempt = 0; attempt < kProtectivePoseMaxAttempts; ++attempt)
     {
       HandVector right_position;
@@ -479,6 +526,7 @@ private:
       }
 
       bool target_changed = false;
+      bool any_force_over_limit = false;
       for (int i = 0; i < kDofPerHand; ++i)
       {
         const double right_net_g = std::max(
@@ -486,16 +534,25 @@ private:
         const double left_net_g = std::max(
             0.0, left_force(i) - force_offset_n(kDofPerHand + i)) *
             1000.0 / 9.8;
-        if (right_net_g >= kDefaultForceLimitG &&
+        right_contact_count[i] = right_net_g >= kDefaultForceLimitG
+            ? right_contact_count[i] + 1 : 0;
+        left_contact_count[i] = left_net_g >= kDefaultForceLimitG
+            ? left_contact_count[i] + 1 : 0;
+        any_force_over_limit = any_force_over_limit ||
+            right_net_g >= kDefaultForceLimitG ||
+            left_net_g >= kDefaultForceLimitG;
+        if (right_contact_count[i] >= kProtectiveContactConfirmSamples &&
             right_target(i) < right_position(i))
         {
           right_target(i) = std::min(1.0, right_position(i) + kBackoff);
+          right_contact_count[i] = 0;
           target_changed = true;
         }
-        if (left_net_g >= kDefaultForceLimitG &&
+        if (left_contact_count[i] >= kProtectiveContactConfirmSamples &&
             left_target(i) < left_position(i))
         {
           left_target(i) = std::min(1.0, left_position(i) + kBackoff);
+          left_contact_count[i] = 0;
           target_changed = true;
         }
       }
@@ -505,12 +562,17 @@ private:
         lefthand->SetPosition(left_target);
       }
 
-      if ((right_position - right_target).cwiseAbs().maxCoeff() <=
+      const bool position_reached =
+          (right_position - right_target).cwiseAbs().maxCoeff() <=
               kProtectivePoseTolerance &&
           (left_position - left_target).cwiseAbs().maxCoeff() <=
-              kProtectivePoseTolerance)
+              kProtectivePoseTolerance;
+      reached_stable_samples = position_reached && !any_force_over_limit
+          ? reached_stable_samples + 1 : 0;
+      if (reached_stable_samples >= kProtectiveReachedStableSamples)
       {
-        std::cout << "[InspireForce] Protective pose reached." << std::endl;
+        std::cout << "[InspireForce] Protective pose reached and force "
+                     "feedback remained stable." << std::endl;
         return;
       }
       usleep(100000);
