@@ -121,12 +121,10 @@ public:
 
       std::cout << "[InspireForce] Starting unloaded right-hand calibration "
                    "(about 10 seconds)..." << std::endl;
-      if (righthand->Calibration() != 0)
-        fail("right hand rejected the force-calibration command");
+      reportCalibrationResult("right", righthand->Calibration());
       std::cout << "[InspireForce] Starting unloaded left-hand calibration "
                    "(about 10 seconds)..." << std::endl;
-      if (lefthand->Calibration() != 0)
-        fail("left hand rejected the force-calibration command");
+      reportCalibrationResult("left", lefthand->Calibration());
       std::cout << "[InspireForce] Calibration completed." << std::endl;
       requireHandsOpen();
       tareForceSensors();
@@ -169,6 +167,19 @@ private:
   {
     std::cerr << "[InspireForce] ERROR: " << message << std::endl;
     std::exit(1);
+  }
+
+  void reportCalibrationResult(const char* side, int16_t result)
+  {
+    if (result == 1)
+      fail(std::string(side) + " hand force-calibration command send failed");
+    if (result == 2)
+    {
+      std::cout << "[InspireForce] WARNING: " << side
+                << " hand sent no recognized calibration ACK; continuing "
+                   "because this is firmware-dependent."
+                << std::endl;
+    }
   }
 
   bool readBothPositions(HandVector& right, HandVector& left)

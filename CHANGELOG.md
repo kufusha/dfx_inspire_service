@@ -9,8 +9,9 @@
 - Add unloaded force calibration and state-only monitoring CLI modes.
 - Add verified low-speed opening, persistent median force baselines, filtered
   contact confirmation, and open-state-only drift compensation.
-- Validate force-calibration acknowledgements and preserve serial read
-  timeouts across repeated transactions.
+- Report force-calibration acknowledgements when available while supporting
+  firmware that returns none, and preserve serial read timeouts across
+  repeated transactions.
 
 ## 1.0.1
 

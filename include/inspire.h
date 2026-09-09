@@ -234,11 +234,11 @@ public:
 
     usleep(5000);
     const size_t first_len = serial_->recv(recvBuff, 9); // Acknowledgement
-    if (!ValidWriteResponse(recvBuff, first_len, 0x2F, 0x06))
-      return 2;
+    const bool acknowledged =
+        ValidWriteResponse(recvBuff, first_len, 0x2F, 0x06);
     sleep(10); // The calibration process takes about 6 seconds
     serial_->recv(recvBuff, 9); // Optional completion frame (firmware-dependent)
-    return 0;
+    return acknowledged ? 0 : 2;
   }
 
   uint8_t id = 1;

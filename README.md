@@ -150,6 +150,10 @@ contact limits use force above that baseline; the firmware force threshold is
 shifted by the same offset. Normal control refuses to start without a valid
 saved baseline. Use `--force-baseline-file PATH` to select another location.
 
+Some hand firmware versions do not return a recognizable calibration
+acknowledgement. The service warns and continues in that case, then relies on
+the verified open posture and stable unloaded baseline to accept calibration.
+
 Diagnostics use `raw/base/net` grams per actuator. `[C]` means that actuator's
 contact latch is active. Slow baseline drift compensation is enabled only
 while the corresponding actuator is physically open and far below contact.
