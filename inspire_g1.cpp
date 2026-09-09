@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <unistd.h>
@@ -30,6 +31,21 @@ constexpr double kEmergencyBackoff = 0.05;
 constexpr double kDirectionEpsilon = 0.002;
 
 using HandVector = Eigen::Matrix<double, kDofPerHand, 1>;
+
+constexpr std::array<const char*, kDofPerHand> kActuatorNames = {
+    "pinky", "ring", "middle", "index", "thumb_bend", "thumb_rotate"};
+
+void printForceRow(const char* side, const HandVector& force_n)
+{
+  std::cout << "  " << std::left << std::setw(5) << side << std::right;
+  for (int i = 0; i < kDofPerHand; ++i)
+  {
+    const double force_g = force_n(i) * 1000.0 / 9.8;
+    std::cout << "  " << kActuatorNames[i] << "="
+              << std::fixed << std::setprecision(1) << force_g;
+  }
+  std::cout << std::defaultfloat << std::endl;
+}
 
 void setVelocity(inspire::InspireHand& hand, const HandVector& value)
 {
@@ -59,6 +75,17 @@ public:
     // Swap serial1/serial2 here if the physical hands are reversed.
     righthand = std::make_shared<inspire::InspireHand>(serial1, 1);
     lefthand = std::make_shared<inspire::InspireHand>(serial2, 1);
+
+    if (param::calibrate_force)
+    {
+      std::cout << "[InspireForce] Starting unloaded right-hand calibration "
+                   "(about 10 seconds)..." << std::endl;
+      righthand->Calibration();
+      std::cout << "[InspireForce] Starting unloaded left-hand calibration "
+                   "(about 10 seconds)..." << std::endl;
+      lefthand->Calibration();
+      std::cout << "[InspireForce] Calibration completed." << std::endl;
+    }
 
     handcmd = std::make_shared<unitree::robot::SubscriptionBase<
         unitree_go::msg::dds_::MotorCmds_>>("rt/" + param::ns + "/cmd");
@@ -209,7 +236,7 @@ private:
     readHand(*righthand, right_, 0);
     readHand(*lefthand, left_, kDofPerHand);
 
-    const bool command_fresh =
+    const bool command_fresh = !param::monitor_only &&
         !handcmd->isTimeout() && handcmd->msg_.cmds().size() >= kTotalDof;
     if (command_fresh)
     {
@@ -251,12 +278,15 @@ private:
     const auto now = std::chrono::steady_clock::now();
     if (now - last_diagnostic_ >= std::chrono::seconds(1))
     {
-      std::cout << "[InspireForce] right[N]="
-                << force_n.block<kDofPerHand, 1>(0, 0).transpose()
-                << " left[N]="
-                << force_n.block<kDofPerHand, 1>(kDofPerHand, 0).transpose()
-                << " sensors=" << (right_.force_valid ? "R" : "-")
-                << (left_.force_valid ? "L" : "-") << std::endl;
+      std::cout << "[InspireForce] force[g]  sensors="
+                << (right_.force_valid ? "R" : "-")
+                << (left_.force_valid ? "L" : "-")
+                << "  mode=" << (param::monitor_only ? "MONITOR" : "CONTROL")
+                << std::endl;
+      printForceRow(
+          "right", force_n.block<kDofPerHand, 1>(0, 0));
+      printForceRow(
+          "left", force_n.block<kDofPerHand, 1>(kDofPerHand, 0));
       last_diagnostic_ = now;
     }
   }
@@ -289,7 +319,8 @@ int main(int argc, char** argv)
   std::cout << " --- Unitree Robotics ---\n"
             << " Inspire Hand Force-Safe Controller\n"
             << " Default force limit: " << kDefaultForceLimitG << " g\n"
-            << " Closing speed: " << kDefaultClosingSpeed << " (raw)\n";
+            << " Closing speed: " << kDefaultClosingSpeed << " (raw)\n"
+            << " Monitor only: " << (param::monitor_only ? "yes" : "no") << "\n";
   InspireRunner runner;
   while (true)
     sleep(1);

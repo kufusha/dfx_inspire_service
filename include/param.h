@@ -16,6 +16,8 @@ inline std::string serial_port;
 inline std::string network; 
 inline std::string ns; 
 inline float threhold;
+inline bool calibrate_force = false;
+inline bool monitor_only = false;
 
 po::variables_map helper(int argc, char** argv)
 {
@@ -32,6 +34,10 @@ po::variables_map helper(int argc, char** argv)
     ("serial,s", po::value<std::string>(&serial_port)->default_value("/dev/ttyUSB0"), "serial port")
     ("network", po::value<std::string>(&network)->default_value(""), "DDS network interface")
     ("namespace", po::value<std::string>(&ns)->default_value("inspire"), "DDS topic namespace")
+    ("calibrate-force", po::bool_switch(&calibrate_force),
+      "calibrate both force sensors before starting (hands must be unloaded)")
+    ("monitor-only", po::bool_switch(&monitor_only),
+      "publish position/force state but ignore all DDS commands")
     ;
 
   po::variables_map vm;
@@ -47,6 +53,13 @@ po::variables_map helper(int argc, char** argv)
   if(ns.empty())
   {
     spdlog::error("Namespace cannot be empty");
+    exit(1);
+  }
+
+  if (calibrate_force && !monitor_only)
+  {
+    spdlog::error("--calibrate-force requires --monitor-only so calibration "
+                  "cannot be followed by motion commands");
     exit(1);
   }
 

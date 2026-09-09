@@ -129,6 +129,19 @@ Before using this on a robot:
 5. Test one finger on a soft object at the default threshold.
 6. Measure force externally and calibrate every physical finger separately.
 
+To zero both force sensors without accepting any motion command, unload every
+finger and run:
+
+```bash
+sudo ./build/inspire_g1 --network eth0 --namespace inspire \
+  --calibrate-force --monitor-only
+```
+
+Calibration runs sequentially and takes about 20 seconds in total. Do not
+touch, support, or load either hand until `Calibration completed` appears.
+Afterward, the process remains in monitor-only mode and prints force feedback;
+restart it without these two flags for normal control.
+
 Do not reuse force calibration coefficients from a different hand. Software
 cannot provide the shutdown pose during power loss, `SIGKILL`, or a hardware
 fault.

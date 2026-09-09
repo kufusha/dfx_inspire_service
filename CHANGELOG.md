@@ -6,6 +6,7 @@
 - Publish measured actuator force through `MotorState.tau_est`.
 - Block additional closure when feedback is unavailable and back off after
   contact-force overshoot.
+- Add unloaded force calibration and state-only monitoring CLI modes.
 
 ## 1.0.1
 
