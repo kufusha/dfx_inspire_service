@@ -139,7 +139,7 @@ sudo ./build/inspire_g1 --network eth0 --namespace inspire \
 ```
 
 The explicit open option moves both hands slowly and verifies their position
-before calibration. Clear the workspace first. Calibration then runs
+for up to 20 seconds before calibration. Clear the workspace first. Calibration then runs
 sequentially and takes about 20 seconds in total. Do not touch, support, or
 load either hand until `Unloaded baseline captured` appears.
 Afterward, the process remains in monitor-only mode and prints force feedback;

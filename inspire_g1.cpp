@@ -39,7 +39,7 @@ constexpr int kTareMaxAttempts = 500;
 constexpr int kTareSettleSeconds = 3;
 constexpr double kCalibrationOpenPosition = 0.90;
 constexpr double kCalibrationOpeningSpeed = 100.0;
-constexpr int kOpenMaxAttempts = 100;
+constexpr int kOpenMaxAttempts = 200;
 constexpr int kContactConfirmSamples = 3;
 constexpr double kForceFilterAlpha = 0.35;
 constexpr double kBaselineDriftAlpha = 0.001;
@@ -81,6 +81,21 @@ double median(std::vector<double>& values)
 bool isFullyOpen(const HandVector& position)
 {
   return (position.array() >= kCalibrationOpenPosition).all();
+}
+
+void printPositionRow(const char* side, const HandVector& position)
+{
+  const auto old_flags = std::cout.flags();
+  const auto old_precision = std::cout.precision();
+  std::cout << "  " << std::left << std::setw(5) << side << std::right;
+  for (int i = 0; i < kDofPerHand; ++i)
+  {
+    std::cout << "  " << kActuatorNames[i] << "="
+              << std::fixed << std::setprecision(3) << position(i);
+  }
+  std::cout.flags(old_flags);
+  std::cout.precision(old_precision);
+  std::cout << std::endl;
 }
 
 void setVelocity(inspire::InspireHand& hand, const HandVector& value)
@@ -229,17 +244,28 @@ private:
 
     HandVector right;
     HandVector left;
+    bool received_position = false;
     for (int attempt = 0; attempt < kOpenMaxAttempts; ++attempt)
     {
-      if (readBothPositions(right, left) &&
-          isFullyOpen(right) && isFullyOpen(left))
+      if (readBothPositions(right, left))
       {
-        std::cout << "[InspireForce] Both hands verified open." << std::endl;
-        return;
+        received_position = true;
+        if (isFullyOpen(right) && isFullyOpen(left))
+        {
+          std::cout << "[InspireForce] Both hands verified open." << std::endl;
+          return;
+        }
       }
       usleep(100000);
     }
-    fail("hands did not reach the verified open position within 10 seconds");
+    if (received_position)
+    {
+      std::cerr << "[InspireForce] Last measured open positions "
+                   "(required >= 0.900):" << std::endl;
+      printPositionRow("right", right);
+      printPositionRow("left", left);
+    }
+    fail("hands did not reach the verified open position within 20 seconds");
   }
 
   bool loadForceBaseline()
