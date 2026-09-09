@@ -43,11 +43,15 @@ constexpr int kContactConfirmSamples = 3;
 constexpr double kForceFilterAlpha = 0.35;
 constexpr double kBaselineDriftAlpha = 0.001;
 constexpr double kTareMaxSpreadG = 50.0;
+constexpr int kProtectivePoseMaxAttempts = 450;
+constexpr double kProtectivePoseTolerance = 0.03;
 
 using HandVector = Eigen::Matrix<double, kDofPerHand, 1>;
 
 constexpr std::array<const char*, kDofPerHand> kActuatorNames = {
     "pinky", "ring", "middle", "index", "thumb_bend", "thumb_rotate"};
+const HandVector kProtectivePose =
+    (HandVector() << 0.0, 0.0, 0.0, 0.0, 0.270, 0.978).finished();
 
 void printForceRow(const char* side, const HandVector& force_n)
 {
@@ -129,6 +133,8 @@ public:
       requireHandsOpen();
       tareForceSensors();
       saveForceBaseline();
+      if (param::return_to_protective_pose)
+        moveToProtectivePose();
     }
     else if (!loadForceBaseline())
     {
@@ -329,6 +335,93 @@ private:
     printForceRow("right", force_offset_n.block<kDofPerHand, 1>(0, 0));
     printForceRow(
         "left", force_offset_n.block<kDofPerHand, 1>(kDofPerHand, 0));
+  }
+
+  void moveToProtectivePose()
+  {
+    std::cout << "[InspireForce] Returning both hands to the protective pose "
+                 "at closing speed " << kDefaultClosingSpeed << "..."
+              << std::endl;
+    const HandVector speed = HandVector::Constant(kDefaultClosingSpeed);
+    HandVector right_target = kProtectivePose;
+    HandVector left_target = kProtectivePose;
+    HandVector right_limit;
+    HandVector left_limit;
+    for (int i = 0; i < kDofPerHand; ++i)
+    {
+      right_limit(i) = std::clamp(
+          kDefaultForceLimitG + force_offset_n(i) * 1000.0 / 9.8,
+          1.0, 1000.0);
+      left_limit(i) = std::clamp(
+          kDefaultForceLimitG +
+              force_offset_n(kDofPerHand + i) * 1000.0 / 9.8,
+          1.0, 1000.0);
+    }
+    setVelocity(*righthand, speed);
+    setVelocity(*lefthand, speed);
+    setForce(*righthand, right_limit);
+    setForce(*lefthand, left_limit);
+    righthand->SetPosition(right_target);
+    lefthand->SetPosition(left_target);
+
+    HandVector last_right_position = HandVector::Ones();
+    HandVector last_left_position = HandVector::Ones();
+    for (int attempt = 0; attempt < kProtectivePoseMaxAttempts; ++attempt)
+    {
+      HandVector right_position;
+      HandVector left_position;
+      HandVector right_force;
+      HandVector left_force;
+      if (!readBothPositions(right_position, left_position) ||
+          righthand->GetForce(right_force) != 0 ||
+          lefthand->GetForce(left_force) != 0)
+      {
+        // Do not leave the full closing target active when feedback is lost.
+        righthand->SetPosition(last_right_position);
+        lefthand->SetPosition(last_left_position);
+        fail("feedback was lost while returning to the protective pose");
+      }
+      last_right_position = right_position;
+      last_left_position = left_position;
+
+      bool target_changed = false;
+      for (int i = 0; i < kDofPerHand; ++i)
+      {
+        const double right_net_g = std::max(
+            0.0, right_force(i) - force_offset_n(i)) * 1000.0 / 9.8;
+        const double left_net_g = std::max(
+            0.0, left_force(i) - force_offset_n(kDofPerHand + i)) *
+            1000.0 / 9.8;
+        if (right_net_g >= kDefaultForceLimitG &&
+            right_target(i) < right_position(i))
+        {
+          right_target(i) = std::min(1.0, right_position(i) + kBackoff);
+          target_changed = true;
+        }
+        if (left_net_g >= kDefaultForceLimitG &&
+            left_target(i) < left_position(i))
+        {
+          left_target(i) = std::min(1.0, left_position(i) + kBackoff);
+          target_changed = true;
+        }
+      }
+      if (target_changed)
+      {
+        righthand->SetPosition(right_target);
+        lefthand->SetPosition(left_target);
+      }
+
+      if ((right_position - right_target).cwiseAbs().maxCoeff() <=
+              kProtectivePoseTolerance &&
+          (left_position - left_target).cwiseAbs().maxCoeff() <=
+              kProtectivePoseTolerance)
+      {
+        std::cout << "[InspireForce] Protective pose reached." << std::endl;
+        return;
+      }
+      usleep(100000);
+    }
+    fail("protective pose was not reached within 45 seconds");
   }
 
   void printDiagnosticRow(

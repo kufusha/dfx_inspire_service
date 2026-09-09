@@ -12,6 +12,8 @@
 - Report force-calibration acknowledgements when available while supporting
   firmware that returns none, and preserve serial read timeouts across
   repeated transactions.
+- Add an explicit force-limited return to the measured protective pose after
+  calibration.
 
 ## 1.0.1
 

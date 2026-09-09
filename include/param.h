@@ -19,6 +19,7 @@ inline float threhold;
 inline bool calibrate_force = false;
 inline bool monitor_only = false;
 inline bool open_before_calibration = false;
+inline bool return_to_protective_pose = false;
 inline std::string force_baseline_file;
 
 po::variables_map helper(int argc, char** argv)
@@ -42,6 +43,8 @@ po::variables_map helper(int argc, char** argv)
       "publish position/force state but ignore all DDS commands")
     ("open-before-calibration", po::bool_switch(&open_before_calibration),
       "slowly open both hands before force calibration")
+    ("return-to-protective-pose", po::bool_switch(&return_to_protective_pose),
+      "slowly return both hands to the configured protective pose afterward")
     ("force-baseline-file", po::value<std::string>(&force_baseline_file)->
       default_value("/var/lib/dfx_inspire_service/force_baseline.txt"),
       "path used to save/load the unloaded force baseline")
@@ -73,6 +76,12 @@ po::variables_map helper(int argc, char** argv)
   if (open_before_calibration && !calibrate_force)
   {
     spdlog::error("--open-before-calibration requires --calibrate-force");
+    exit(1);
+  }
+
+  if (return_to_protective_pose && !calibrate_force)
+  {
+    spdlog::error("--return-to-protective-pose requires --calibrate-force");
     exit(1);
   }
 

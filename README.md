@@ -134,7 +134,8 @@ finger and run:
 
 ```bash
 sudo ./build/inspire_g1 --network eth0 --namespace inspire \
-  --calibrate-force --open-before-calibration --monitor-only
+  --calibrate-force --open-before-calibration \
+  --return-to-protective-pose --monitor-only
 ```
 
 The explicit open option moves both hands slowly and verifies their position
@@ -153,6 +154,10 @@ saved baseline. Use `--force-baseline-file PATH` to select another location.
 Some hand firmware versions do not return a recognizable calibration
 acknowledgement. The service warns and continues in that case, then relies on
 the verified open posture and stable unloaded baseline to accept calibration.
+
+`--return-to-protective-pose` then closes at raw speed 25 toward
+`[0, 0, 0, 0, 0.270, 0.978]` for each hand. Firmware and software force checks
+limit each actuator to 100 g above its measured baseline during this move.
 
 Diagnostics use `raw/base/net` grams per actuator. `[C]` means that actuator's
 contact latch is active. Slow baseline drift compensation is enabled only
